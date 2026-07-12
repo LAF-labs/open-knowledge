@@ -1,7 +1,7 @@
 /**
  * Always-installed `window.fetch` wrapper for the web app + desktop renderer.
  *
- * Two responsibilities, on the single seam every browser `/api/*` call passes
+ * Three responsibilities, on the single seam every browser `/api/*` call passes
  * through:
  *
  * 1. **Version headers (always).** Every request to the local server's `/api/*`
@@ -17,6 +17,10 @@
  *    the Vite HTML fallback — "Server error (HTTP 200)". Web / CLI distribution
  *    has no `apiOrigin`; relative fetches stay relative and hit the same-origin
  *    server as before.
+ *
+ * 3. **Hosted adapter (opt-in).** An embedding web host can prefix same-origin
+ *    API paths and attach fixed routing headers. With no bootstrap config this
+ *    branch is inert, preserving the standalone web and desktop contracts.
  *
  * The wrapper instruments by **resolved `/api/*` target**, not raw string
  * prefix: a relative `/api/*` path, a same-origin absolute `/api/*` URL, or an
@@ -36,6 +40,13 @@ import { browserClientVersionHeaders } from '@/lib/client-version';
 interface ClientFetchConfig {
   /** Electron utility-process API origin. Absent (web / CLI) → no URL rewrite. */
   apiOrigin?: string;
+  /**
+   * Optional same-origin prefix for hosted adapters. `/api/documents` becomes
+   * `<apiPrefix>/documents`; absent keeps the standalone route unchanged.
+   */
+  apiPrefix?: string;
+  /** Headers a trusted host adds to every local API request. */
+  apiHeaders?: Record<string, string>;
 }
 
 const FETCH_WRAPPER_MARKER = Symbol.for('ok.client.fetchWrapper');
@@ -49,23 +60,24 @@ const FETCH_WRAPPER_MARKER = Symbol.for('ok.client.fetchWrapper');
 export function installClientFetchWrapper(config: ClientFetchConfig = {}): void {
   if (typeof window === 'undefined') return;
   const apiOrigin = config.apiOrigin && config.apiOrigin.length > 0 ? config.apiOrigin : undefined;
+  const apiPrefix = normalizeApiPrefix(config.apiPrefix);
 
   const current = window.fetch as typeof window.fetch & { [FETCH_WRAPPER_MARKER]?: true };
   if (current[FETCH_WRAPPER_MARKER]) return;
 
   const origFetch = window.fetch.bind(window);
   // Version metadata is constant for the bundle's lifetime — resolve once.
-  const versionHeaders = browserClientVersionHeaders();
+  const apiHeaders = { ...config.apiHeaders, ...browserClientVersionHeaders() };
 
   const wrapped = ((input: RequestInfo | URL, init?: RequestInit) => {
-    const target = resolveApiTarget(input, apiOrigin);
+    const target = resolveApiTarget(input, apiOrigin, apiPrefix);
     if (!target.isApi) return origFetch(input, init);
 
     if (input instanceof Request) {
-      const headers = mergeHeaders(input.headers, versionHeaders);
+      const headers = mergeHeaders(input.headers, apiHeaders);
       return origFetch(new Request(target.url, input), { headers });
     }
-    const headers = mergeHeaders(init?.headers, versionHeaders);
+    const headers = mergeHeaders(init?.headers, apiHeaders);
     return origFetch(target.url, { ...init, headers });
   }) as typeof window.fetch & { [FETCH_WRAPPER_MARKER]?: true };
 
@@ -93,14 +105,19 @@ interface ApiTarget {
  * `/api/*` path, a same-origin (or `file://`) absolute `/api/*` URL, or an
  * absolute URL already targeting `apiOrigin`'s `/api/*`.
  */
-function resolveApiTarget(input: RequestInfo | URL, apiOrigin: string | undefined): ApiTarget {
+function resolveApiTarget(
+  input: RequestInfo | URL,
+  apiOrigin: string | undefined,
+  apiPrefix: string | undefined,
+): ApiTarget {
   if (typeof input === 'string') {
     if (input.startsWith('/api/')) {
-      return { isApi: true, url: apiOrigin ? apiOrigin + input : input };
+      const path = prefixApiPath(input, apiPrefix);
+      return { isApi: true, url: apiOrigin ? apiOrigin + path : path };
     }
     const parsed = tryParseUrl(input);
     if (parsed && isLocalApiUrl(parsed, apiOrigin)) {
-      return { isApi: true, url: input };
+      return { isApi: true, url: prefixAbsoluteApiUrl(parsed, apiPrefix) };
     }
     return { isApi: false, url: input };
   }
@@ -111,11 +128,35 @@ function resolveApiTarget(input: RequestInfo | URL, apiOrigin: string | undefine
     // URL already on apiOrigin stays as-is.
     const original = input instanceof URL ? input.href : input.url;
     if (apiOrigin && (parsed.origin === window.location.origin || parsed.protocol === 'file:')) {
-      return { isApi: true, url: apiOrigin + parsed.pathname + parsed.search + parsed.hash };
+      return {
+        isApi: true,
+        url: apiOrigin + prefixApiPath(parsed.pathname, apiPrefix) + parsed.search + parsed.hash,
+      };
     }
-    return { isApi: true, url: original };
+    return {
+      isApi: true,
+      url: apiPrefix ? prefixAbsoluteApiUrl(parsed, apiPrefix) : original,
+    };
   }
   return { isApi: false, url: input instanceof URL ? input.href : input.url };
+}
+
+function normalizeApiPrefix(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.endsWith('/') ? value.slice(0, -1) : value;
+  return /^\/api(?:\/[A-Za-z0-9._~-]+)*$/.test(trimmed) ? trimmed : undefined;
+}
+
+function prefixApiPath(path: string, apiPrefix: string | undefined): string {
+  if (!apiPrefix || path === apiPrefix || path.startsWith(`${apiPrefix}/`)) return path;
+  return apiPrefix + path.slice('/api'.length);
+}
+
+function prefixAbsoluteApiUrl(url: URL, apiPrefix: string | undefined): string {
+  if (!apiPrefix) return url.href;
+  const next = new URL(url.href);
+  next.pathname = prefixApiPath(next.pathname, apiPrefix);
+  return next.href;
 }
 
 function tryParseUrl(url: string, base?: string): URL | null {

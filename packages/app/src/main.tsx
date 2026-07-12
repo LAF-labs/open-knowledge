@@ -32,6 +32,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import '@/lib/desktop-bridge-types';
 import { installClientFetchWrapper } from '@/lib/client-fetch';
 import { installConsentListener } from '@/lib/consent-store';
+import { hostedClientFetchConfig } from '@/lib/hosted-bootstrap';
 // Side-effect import: loads + activates the i18n catalog before first render.
 import { i18n } from '@/lib/i18n';
 import { installClientLogForwarder } from '@/lib/install-client-log-forwarder';
@@ -65,13 +66,13 @@ import 'katex/dist/katex.min.css';
 import './globals.css';
 
 // Always-on client fetch wrapper: injects the client's version headers on every
-// `/api/*` request (web, `ok ui`, AND desktop renderer) and — in Electron only,
-// where `apiOrigin` is set — rewrites relative `/api/*` to the utility process
-// (the renderer host doesn't serve /api; the hocuspocus instance behind the
-// bridge does). Must run BEFORE any component mounts so the first paint's
-// `fetch('/api/documents')` is both instrumented and routed correctly.
+// `/api/*` request (web, `ok ui`, AND desktop renderer). Electron's `apiOrigin`
+// targets the utility process; an optional web-host bootstrap can instead add
+// a same-origin API prefix and routing headers. Must run BEFORE any component
+// mounts so the first `fetch('/api/documents')` is instrumented and routed.
 installClientFetchWrapper({
   apiOrigin: typeof window !== 'undefined' ? window.okDesktop?.config.apiOrigin : undefined,
+  ...hostedClientFetchConfig(),
 });
 
 // Forward renderer console output to the server `/api/client-logs` ingest so

@@ -96,6 +96,44 @@ describe('installClientFetchWrapper', () => {
     expect(header(calls[0], KIND)).toBe('web');
   });
 
+  test('hosted mode prefixes local API paths and injects host headers', async () => {
+    const { calls } = stubWindowFetch();
+    installClientFetchWrapper({
+      apiPrefix: '/api/open-knowledge',
+      apiHeaders: { 'x-laf-workspace-slug': 'demo-team' },
+    });
+    await window.fetch('/api/documents?showAll=true');
+    expect(calls[0]?.input).toBe('/api/open-knowledge/documents?showAll=true');
+    expect(header(calls[0], 'x-laf-workspace-slug')).toBe('demo-team');
+    expect(header(calls[0], PROTOCOL)).toBe('1');
+  });
+
+  test('hosted mode prefixes same-origin Request URLs once and preserves request headers', async () => {
+    const { calls } = stubWindowFetch();
+    installClientFetchWrapper({
+      apiPrefix: '/api/open-knowledge',
+      apiHeaders: { 'x-laf-workspace-slug': 'demo-team' },
+    });
+    await window.fetch(
+      new Request('http://localhost:5173/api/create-page', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const rewritten = calls[0]?.input as Request;
+    expect(rewritten.url).toBe('http://localhost:5173/api/open-knowledge/create-page');
+    expect(rewritten.method).toBe('POST');
+    expect(header(calls[0], 'content-type')).toBe('application/json');
+    expect(header(calls[0], 'x-laf-workspace-slug')).toBe('demo-team');
+  });
+
+  test('hosted mode does not double-prefix an already-prefixed API URL', async () => {
+    const { calls } = stubWindowFetch();
+    installClientFetchWrapper({ apiPrefix: '/api/open-knowledge' });
+    await window.fetch('/api/open-knowledge/pages');
+    expect(calls[0]?.input).toBe('/api/open-knowledge/pages');
+  });
+
   // A caller that pre-prepends apiOrigin (skill installer)
   // must still be instrumented even though it bypasses the relative-path rewrite.
   test('absolute apiOrigin /api/* gets headers without double-rewrite', async () => {
@@ -137,6 +175,13 @@ describe('installClientFetchWrapper', () => {
     await window.fetch('/assets/favicon.svg');
     expect(calls[0]?.input).toBe('/assets/favicon.svg');
     expect(header(calls[0], PROTOCOL)).toBeUndefined();
+  });
+
+  test('ignores invalid hosted API prefixes', async () => {
+    const { calls } = stubWindowFetch();
+    installClientFetchWrapper({ apiPrefix: 'https://example.com/api' });
+    await window.fetch('/api/documents');
+    expect(calls[0]?.input).toBe('/api/documents');
   });
 
   test('leaves URL object for absolute external unchanged', async () => {
